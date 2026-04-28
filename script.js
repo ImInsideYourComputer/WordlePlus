@@ -1,10 +1,14 @@
 /* =========================================================
-   Wordle+  —  UI behavior
+   Wordle+  —  UI + game behavior
    - Theme toggle (light/dark, persisted)
-   - 20-column grid, infinite rows, auto-scroll
-   - On-screen keyboard (click + physical key support)
-   - Dictionary check on submit (lazy-loaded per word length)
+   - Random target word per game; length is hidden from the player
+   - Fixed 20-wide grid, infinite rows, auto-scroll
+   - Any-length guesses accepted (must exist in dictionary)
+   - Cross-length flip-reveal coloring (green/yellow/grey)
+   - Keyboard letter coloring with priority green > yellow > grey
    - Toast popup for invalid words
+   - Win modal with Play Again
+   - Debug "Show word" toggle
    ========================================================= */
 
 (() => {
@@ -12,8 +16,13 @@
 
   const COLUMNS = 20;
   const INITIAL_ROWS = 6;
+  const ALLOWED_LENGTHS = [4, 5, 6, 7, 8];
   const STORAGE_KEY = "wordleplus.theme";
   const DICT_PATH = (n) => `dictionaries/words-${n}.json`;
+
+  const FLIP_DURATION = 520;   // ms (must match CSS)
+  const FLIP_STAGGER  = 200;   // ms between cells
+  const WIN_TITLES = ["Genius", "Magnificent", "Impressive", "Splendid", "Great", "Phew"];
 
   /* ---------- Theme ---------- */
   const root = document.documentElement;
@@ -52,22 +61,15 @@
     toast.className = "toast";
     toast.textContent = message;
     toastContainer.appendChild(toast);
-
     setTimeout(() => {
       toast.classList.add("toast-out");
-      toast.addEventListener(
-        "animationend",
-        () => toast.remove(),
-        { once: true }
-      );
+      toast.addEventListener("animationend", () => toast.remove(), { once: true });
     }, duration);
   };
 
-  /* ---------- Dictionary ---------- */
-  // Map<length, Set<string> | null>  (null marker = file missing / failed)
-  const dictCache = new Map();
-  // Map<length, Promise<Set|null>>  (in-flight requests)
-  const dictPending = new Map();
+  /* ---------- Dictionary (lazy, length-keyed cache) ---------- */
+  const dictCache = new Map();   // length -> Set<string> | null
+  const dictPending = new Map(); // length -> Promise
 
   const loadDict = (length) => {
     if (dictCache.has(length)) return Promise.resolve(dictCache.get(length));
@@ -99,9 +101,19 @@
     return set.has(word.toLowerCase());
   };
 
+  /* ---------- Game state ---------- */
+  const game = {
+    target: "",
+    wordLength: 5,
+    guesses: 0,
+    isOver: false,
+  };
+
   /* ---------- Board ---------- */
   const board = document.getElementById("board");
   const wrapper = document.getElementById("board-wrapper");
+  const revealBtn = document.getElementById("reveal-btn");
+  const revealText = document.getElementById("reveal-text");
 
   /** @type {HTMLDivElement[][]} */
   const rows = [];
@@ -140,8 +152,7 @@
 
   const shakeCurrentRow = () => {
     if (currentRow >= rows.length) return;
-    const rowEls = rows[currentRow];
-    const parent = rowEls[0].parentElement;
+    const parent = rows[currentRow][0].parentElement;
     parent.classList.add("row-shake");
     setTimeout(() => parent.classList.remove("row-shake"), 360);
   };
@@ -153,16 +164,189 @@
       .join("")
       .toLowerCase();
 
-  const initBoard = () => {
+  const clearBoard = () => {
+    board.innerHTML = "";
+    rows.length = 0;
+    currentRow = 0;
+    currentCol = 0;
+  };
+
+  /* ---------- Guess evaluation ---------- */
+  // Two-pass evaluation that supports guess.length !== target.length.
+  // Positions beyond target.length cannot be "correct" (no green possible),
+  // but extra letters can still be "present" if they appear in target.
+  const evaluateGuess = (guess, target) => {
+    const result = new Array(guess.length).fill("absent");
+    const counts = {};
+    for (const ch of target) counts[ch] = (counts[ch] || 0) + 1;
+
+    for (let i = 0; i < guess.length; i++) {
+      if (i < target.length && guess[i] === target[i]) {
+        result[i] = "correct";
+        counts[guess[i]]--;
+      }
+    }
+    for (let i = 0; i < guess.length; i++) {
+      if (result[i] === "correct") continue;
+      if (counts[guess[i]] > 0) {
+        result[i] = "present";
+        counts[guess[i]]--;
+      }
+    }
+    return result;
+  };
+
+  /* ---------- Reveal animation ---------- */
+  const revealRow = (rowIdx, results) =>
+    new Promise((resolve) => {
+      const cells = rows[rowIdx];
+      for (let i = 0; i < results.length; i++) {
+        setTimeout(() => {
+          cells[i].classList.add("flipping");
+          // Apply color at flip midpoint so the colored face appears on flip-back.
+          setTimeout(() => {
+            cells[i].classList.remove("filled", "active");
+            cells[i].classList.add(results[i]);
+          }, FLIP_DURATION / 2);
+        }, i * FLIP_STAGGER);
+      }
+      const total = (results.length - 1) * FLIP_STAGGER + FLIP_DURATION + 30;
+      setTimeout(resolve, total);
+    });
+
+  const bounceRow = (rowIdx) => {
+    const cells = rows[rowIdx];
+    cells.forEach((cell, i) => {
+      setTimeout(() => {
+        cell.classList.add("win-bounce");
+        cell.addEventListener(
+          "animationend",
+          () => cell.classList.remove("win-bounce"),
+          { once: true }
+        );
+      }, i * 80);
+    });
+  };
+
+  /* ---------- Keyboard coloring ---------- */
+  const RANK = { absent: 0, present: 1, correct: 2 };
+
+  const updateKeyboardColors = (guess, results) => {
+    for (let i = 0; i < guess.length; i++) {
+      const letter = guess[i].toLowerCase();
+      const key = document.querySelector(`.key[data-key="${letter}"]`);
+      if (!key) continue;
+
+      const current = key.classList.contains("correct")
+        ? "correct"
+        : key.classList.contains("present")
+        ? "present"
+        : key.classList.contains("absent")
+        ? "absent"
+        : null;
+
+      const next = results[i];
+      if (current === null || RANK[next] > RANK[current]) {
+        key.classList.remove("correct", "present", "absent");
+        key.classList.add(next);
+      }
+    }
+  };
+
+  const resetKeyboardColors = () => {
+    document.querySelectorAll(".key").forEach((k) =>
+      k.classList.remove("correct", "present", "absent")
+    );
+  };
+
+  /* ---------- Win modal ---------- */
+  const winModal = document.getElementById("win-modal");
+  const modalTitle = document.getElementById("modal-title");
+  const modalWord = document.getElementById("modal-word");
+  const modalStats = document.getElementById("modal-stats");
+  const playAgainBtn = document.getElementById("play-again");
+
+  const showWinModal = () => {
+    modalTitle.textContent = WIN_TITLES[Math.min(game.guesses - 1, WIN_TITLES.length - 1)];
+    modalWord.textContent = game.target;
+    modalStats.textContent = `Solved in ${game.guesses} ${
+      game.guesses === 1 ? "guess" : "guesses"
+    }`;
+    winModal.hidden = false;
+    requestAnimationFrame(() => winModal.classList.add("visible"));
+  };
+
+  const hideWinModal = () => {
+    winModal.classList.remove("visible");
+    setTimeout(() => {
+      winModal.hidden = true;
+    }, 220);
+  };
+
+  playAgainBtn.addEventListener("click", async () => {
+    hideWinModal();
+    await startNewGame();
+  });
+
+  /* ---------- New game ---------- */
+  async function startNewGame() {
+    busy = true;
+
+    // Pick length, then a random word from that length's dictionary.
+    let target = null;
+    const lengths = ALLOWED_LENGTHS.slice();
+    while (lengths.length && !target) {
+      const idx = Math.floor(Math.random() * lengths.length);
+      const length = lengths.splice(idx, 1)[0];
+      const set = await loadDict(length);
+      if (set && set.size > 0) {
+        const arr = Array.from(set);
+        target = arr[Math.floor(Math.random() * arr.length)];
+        game.wordLength = length;
+        game.target = target.toLowerCase();
+      }
+    }
+
+    if (!target) {
+      showToast("Could not load dictionary");
+      busy = false;
+      return;
+    }
+
+    game.guesses = 0;
+    game.isOver = false;
+
+    clearBoard();
     for (let r = 0; r < INITIAL_ROWS; r++) appendRow();
     setActiveCell(currentRow, currentCol);
+    resetKeyboardColors();
+    wrapper.scrollTop = 0;
+    setRevealed(false);
+
+    busy = false;
+  }
+
+  /* ---------- Debug: reveal target word ---------- */
+  const setRevealed = (revealed) => {
+    if (revealed) {
+      revealBtn.setAttribute("aria-pressed", "true");
+      revealText.textContent = game.target ? game.target.toUpperCase() : "—";
+    } else {
+      revealBtn.setAttribute("aria-pressed", "false");
+      revealText.textContent = "Show word";
+    }
   };
+
+  revealBtn.addEventListener("click", () => {
+    const isOn = revealBtn.getAttribute("aria-pressed") === "true";
+    setRevealed(!isOn);
+  });
 
   /* ---------- Input handling ---------- */
   const isLetter = (key) => /^[a-zA-Z]$/.test(key);
 
   const typeLetter = (letter) => {
-    if (busy) return;
+    if (busy || game.isOver) return;
     if (currentCol >= COLUMNS) return;
     const cell = rows[currentRow][currentCol];
     cell.textContent = letter.toUpperCase();
@@ -172,7 +356,7 @@
   };
 
   const deleteLetter = () => {
-    if (busy) return;
+    if (busy || game.isOver) return;
     if (currentCol === 0) return;
     currentCol--;
     const cell = rows[currentRow][currentCol];
@@ -182,7 +366,7 @@
   };
 
   const submitRow = async () => {
-    if (busy) return;
+    if (busy || game.isOver) return;
 
     if (currentCol === 0) {
       shakeCurrentRow();
@@ -195,22 +379,36 @@
     let valid = false;
     try {
       valid = await isValidWord(word);
-    } finally {
-      busy = false;
+    } catch {
+      valid = false;
     }
 
     if (!valid) {
       showToast("Not in word list");
       shakeCurrentRow();
+      busy = false;
       return;
     }
 
-    // Game logic (coloring) intentionally omitted for now.
+    const results = evaluateGuess(word, game.target);
+    await revealRow(currentRow, results);
+    updateKeyboardColors(word, results);
+    game.guesses++;
+
+    if (word === game.target) {
+      game.isOver = true;
+      bounceRow(currentRow);
+      setTimeout(showWinModal, 700);
+      busy = false;
+      return;
+    }
+
     currentRow++;
     currentCol = 0;
     if (currentRow >= rows.length) appendRow();
     setActiveCell(currentRow, currentCol);
     requestAnimationFrame(scrollActiveIntoView);
+    busy = false;
   };
 
   /* ---------- Keyboard wiring ---------- */
@@ -226,11 +424,17 @@
     const btn = e.target.closest(".key");
     if (!btn) return;
     handleKey(btn.dataset.key);
-    btn.blur(); // prevent Enter/Space from re-triggering the last clicked key
+    btn.blur();
   });
 
   document.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    if (!winModal.hidden && e.key === "Enter") {
+      e.preventDefault();
+      playAgainBtn.click();
+      return;
+    }
 
     if (e.key === "Enter") {
       e.preventDefault();
@@ -244,5 +448,6 @@
     }
   });
 
-  initBoard();
+  /* ---------- Boot ---------- */
+  startNewGame();
 })();

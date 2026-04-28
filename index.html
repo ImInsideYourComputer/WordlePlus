@@ -34,6 +34,19 @@
   <div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
   <main class="main">
+    <div class="info-bar">
+      <button class="reveal-btn" id="reveal-btn" type="button" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="reveal-icon icon-eye">
+          <path d="M12 5c-7 0-11 7-11 7s4 7 11 7 11-7 11-7-4-7-11-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/>
+          <circle cx="12" cy="12" r="2"/>
+        </svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="reveal-icon icon-eye-off">
+          <path d="M2 4.5L4 2.5l18 18-2 2-3.4-3.4A12.6 12.6 0 0 1 12 19C5 19 1 12 1 12a18.3 18.3 0 0 1 4.4-5.1L2 4.5zM8.5 9.4l1.6 1.6a2 2 0 0 0 2.9 2.9l1.6 1.6A4 4 0 0 1 8.5 9.4zM12 5c7 0 11 7 11 7a18.7 18.7 0 0 1-3.4 4.3l-2.6-2.6a4 4 0 0 0-5.7-5.7L9.3 5.2A12.5 12.5 0 0 1 12 5z"/>
+        </svg>
+        <span class="reveal-text" id="reveal-text">Show word</span>
+      </button>
+    </div>
+
     <div class="board-wrapper" id="board-wrapper">
       <div class="board" id="board" role="grid" aria-label="Guess grid"></div>
     </div>
@@ -81,6 +94,16 @@
       </div>
     </div>
   </main>
+
+  <div class="modal-overlay" id="win-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden>
+    <div class="modal">
+      <h2 class="modal-title" id="modal-title">Magnificent</h2>
+      <p class="modal-label">The word was</p>
+      <p class="modal-word" id="modal-word">word</p>
+      <p class="modal-stats" id="modal-stats">Solved in 1 guess</p>
+      <button class="modal-btn" id="play-again" type="button">Play Again</button>
+    </div>
+  </div>
 
   <footer class="footer">
     <a
